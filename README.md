@@ -2,7 +2,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.9%2B-blue.svg)](https://www.python.org/)
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.32.0-red.svg)](https://streamlit.io/)
-[![Deployment](https://img.shields.io/badge/Live_App-Click_Here-success.svg)]([#](https://ev-systems-planner.streamlit.app)) 
+[![Deployment](https://img.shields.io/badge/Live_App-Click_Here-success.svg)](https://ev-systems-planner.streamlit.app) 
 
 A production-grade Python application utilizing topographical numerical integration, stochastic Monte Carlo simulations, and real-time APIs to model Electric Vehicle (EV) kinetic resistance, thermodynamics, and battery degradation over spatial routes. 
 
