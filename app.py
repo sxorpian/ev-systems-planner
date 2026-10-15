@@ -35,7 +35,80 @@ AERO_ACCESSORIES = {
 
 PROJECT_USER_AGENT = "grcc_ev_portfolio_project_cj/2.0"
 
+STATE_ABBRS = {
+    "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas", "CA": "California",
+    "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware", "FL": "Florida", "GA": "Georgia",
+    "HI": "Hawaii", "ID": "Idaho", "IL": "Illinois", "IN": "Indiana", "IA": "Iowa",
+    "KS": "Kansas", "KY": "Kentucky", "LA": "Louisiana", "ME": "Maine", "MD": "Maryland",
+    "MA": "Massachusetts", "MI": "Michigan", "MN": "Minnesota", "MS": "Mississippi", "MO": "Missouri",
+    "MT": "Montana", "NE": "Nebraska", "NV": "Nevada", "NH": "New Hampshire", "NJ": "New Jersey",
+    "NM": "New Mexico", "NY": "New York", "NC": "North Carolina", "ND": "North Dakota", "OH": "Ohio",
+    "OK": "Oklahoma", "OR": "Oregon", "PA": "Pennsylvania", "RI": "Rhode Island", "SC": "South Carolina",
+    "SD": "South Dakota", "TN": "Tennessee", "TX": "Texas", "UT": "Utah", "VT": "Vermont",
+    "VA": "Virginia", "WA": "Washington", "WV": "West Virginia", "WI": "Wisconsin", "WY": "Wyoming"
+}
+
 # --- GEOGRAPHIC & NAVIGATION UTILITIES ---
+def clean_address_query(address):
+    """Normalizes raw input strings and expands state abbreviations for fuzzy geocoding."""
+    tokens = address.replace(',', ' ').split()
+    cleaned = []
+    for token in tokens:
+        up = token.upper().strip()
+        if up in STATE_ABBRS:
+            cleaned.append(STATE_ABBRS[up])
+        else:
+            cleaned.append(token)
+    return " ".join(cleaned)
+
+@st.cache_data(show_spinner=False)
+def get_coordinates(address):
+    """3-tiered resilient fuzzy geocoder with fallback handling for spelling errors."""
+    if not address or not address.strip():
+        return None
+        
+    query = clean_address_query(address)
+    headers = {"User-Agent": PROJECT_USER_AGENT}
+    
+    # Tier 1: Photon Geocoding API (Fast, OpenStreetMap-backed, Fuzzy & Typo-Tolerant)
+    try:
+        encoded_query = urllib.parse.quote(query)
+        photon_url = f"https://photon.komoot.io/api/?q={encoded_query}&limit=1"
+        resp = requests.get(photon_url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            features = resp.json().get("features", [])
+            if features:
+                coords = features[0]["geometry"]["coordinates"]  # [lon, lat]
+                return (coords[1], coords[0])  # Returns (lat, lon)
+    except Exception:
+        pass
+
+    # Tier 2: Open-Meteo Fuzzy Geocoding API
+    try:
+        first_word = query.split()[0]
+        meteo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={urllib.parse.quote(first_word)}&count=1&language=en&format=json"
+        resp = requests.get(meteo_url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            results = resp.json().get("results", [])
+            if results:
+                return (results[0]["latitude"], results[0]["longitude"])
+    except Exception:
+        pass
+
+    # Tier 3: Nominatim (Fallback)
+    try:
+        geolocator = Nominatim(user_agent=PROJECT_USER_AGENT, timeout=10)
+        loc = geolocator.geocode(query)
+        if loc:
+            return (loc.latitude, loc.longitude)
+        loc_raw = geolocator.geocode(address)
+        if loc_raw:
+            return (loc_raw.latitude, loc_raw.longitude)
+    except Exception:
+        pass
+
+    return None
+
 def haversine(lon1, lat1, lon2, lat2):
     R = 3958.8 
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -62,15 +135,6 @@ def get_live_weather(lat, lon):
             return c.get("temperature_2m", 70.0), c.get("wind_speed_10m", 0.0), c.get("wind_direction_10m", 0.0)
     except Exception: pass
     return 70.0, 0.0, 0.0
-
-@st.cache_data(show_spinner=False)
-def get_coordinates(address):
-    try:
-        geolocator = Nominatim(user_agent=PROJECT_USER_AGENT, timeout=15)
-        loc = geolocator.geocode(address)
-        return (loc.latitude, loc.longitude) if loc else None
-    except Exception:
-        return None
 
 @st.cache_data(show_spinner=False)
 def get_route_data_multi(coords_list):
@@ -169,7 +233,6 @@ def build_gpx_file(route_coords, charge_stops):
     return "\n".join(gpx)
 
 def calculate_map_center_and_zoom(route_coords):
-    """Calculates the geometric centroid and optimal zoom level for framing the route."""
     lats = [c[1] for c in route_coords]
     lons = [c[0] for c in route_coords]
     
@@ -416,7 +479,7 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         for p in places:
             c = get_coordinates(p)
             if c is None:
-                st.error(f"⚠️ Geocoding failed for city: '{p}'. Verify spelling or location name.")
+                st.error(f"⚠️ Could not locate address: '{p}'. Try specifying city and state.")
                 st.stop()
             coords_list.append(c)
             
@@ -480,7 +543,6 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         ])
         
         with tab_map:
-            # Dynamic calculation of map center and zoom level to frame the route
             center_lat, center_lon, dynamic_zoom = calculate_map_center_and_zoom(full_route_coords)
             
             layers = [pdk.Layer("PathLayer", data=[{"path": full_route_coords}], get_path="path", get_color=[0, 180, 255], width_min_pixels=4)]
