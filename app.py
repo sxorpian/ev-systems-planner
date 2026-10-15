@@ -250,8 +250,10 @@ def build_google_maps_url(origin_coords, dest_coords, charge_stops):
     dest_str = f"{dest_coords[0]},{dest_coords[1]}"
     
     if charge_stops:
-        waypoints_str = "|".join([f"{stop['coords'][1]},{stop['coords'][0]}" for stop in charge_stops])
-        url = f"https://www.google.com/maps/dir/?api=1&origin={origin_str}&destination={dest_str}&waypoints={waypoints_str}&travelmode=driving"
+        # URL-encode the pipe characters (%7C) so Google Maps reads the waypoints correctly
+        waypoints = "|".join([f"{stop['coords'][1]},{stop['coords'][0]}" for stop in charge_stops])
+        waypoints_encoded = urllib.parse.quote(waypoints)
+        url = f"https://www.google.com/maps/dir/?api=1&origin={origin_str}&destination={dest_str}&waypoints={waypoints_encoded}&travelmode=driving"
     else:
         url = f"https://www.google.com/maps/dir/?api=1&origin={origin_str}&destination={dest_str}&travelmode=driving"
     return url
