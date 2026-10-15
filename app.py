@@ -12,19 +12,11 @@ import urllib.parse
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="EV Spatial Simulator & Trip Planner", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# --- PWA & MOBILE VIEWPORT STYLING (FINAL SIDEBAR FIX) ---
+# --- PWA & MOBILE VIEWPORT STYLING (SAFE ROLLBACK) ---
 st.markdown("""
     <style>
-        /* Hide Streamlit branding and top-right menu */
-        #MainMenu {visibility: hidden;}
-        [data-testid="stToolbar"] {visibility: hidden;}
+        /* Only hide the Streamlit footer. Leave the header and sidebar completely untouched. */
         footer {visibility: hidden;}
-        
-        /* Make the header transparent so the native sidebar toggle works normally */
-        header {background: transparent !important;}
-        
-        /* Adjust top padding so content doesn't hide under the transparent header */
-        .block-container {padding-top: 3rem !important; padding-bottom: 0rem !important;}
     </style>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
