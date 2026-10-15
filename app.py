@@ -7,6 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import pydeck as pdk
 from geopy.geocoders import Nominatim
+import urllib.parse
 
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="EV Spatial Simulator & Trip Planner", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
@@ -32,10 +33,9 @@ AERO_ACCESSORIES = {
     "Enclosed Heavy Box Trailer": {"delta_cd": 0.28, "delta_area": 1.50, "extra_weight_lbs": 3500}
 }
 
-# Unique identifier to bypass OpenStreetMap bot-blockers
 PROJECT_USER_AGENT = "grcc_ev_portfolio_project_cj/2.0"
 
-# --- GEOGRAPHIC & INFRASTRUCTURE UTILITIES ---
+# --- GEOGRAPHIC & NAVIGATION UTILITIES ---
 def haversine(lon1, lat1, lon2, lat2):
     R = 3958.8 
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -138,6 +138,62 @@ def get_nearest_charger(lat, lon):
                 return s["station_name"], [s["longitude"], s["latitude"]], s["distance"]
     except Exception: pass
     return None, None, None
+
+def build_google_maps_url(origin_coords, dest_coords, charge_stops):
+    origin_str = f"{origin_coords[0]},{origin_coords[1]}"
+    dest_str = f"{dest_coords[0]},{dest_coords[1]}"
+    
+    if charge_stops:
+        waypoints_str = "|".join([f"{stop['coords'][1]},{stop['coords'][0]}" for stop in charge_stops])
+        url = f"https://www.google.com/maps/dir/?api=1&origin={origin_str}&destination={dest_str}&waypoints={waypoints_str}&travelmode=driving"
+    else:
+        url = f"https://www.google.com/maps/dir/?api=1&origin={origin_str}&destination={dest_str}&travelmode=driving"
+    return url
+
+def build_gpx_file(route_coords, charge_stops):
+    gpx = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<gpx version="1.1" creator="EV Spatial Simulator" xmlns="http://www.topografix.com/GPX/1/1">'
+    ]
+    for idx, stop in enumerate(charge_stops):
+        gpx.append(f'  <wpt lat="{stop["coords"][1]}" lon="{stop["coords"][0]}">')
+        gpx.append(f'    <name>Charging Stop {idx+1}: {stop["name"]}</name>')
+        gpx.append('    <sym>Charging Station</sym>')
+        gpx.append('  </wpt>')
+    
+    gpx.append('  <trk><name>EV Spatial Planned Route</name><trkseg>')
+    for pt in route_coords:
+        gpx.append(f'    <trkpt lat="{pt[1]}" lon="{pt[0]}"></trkpt>')
+    gpx.append('  </trkseg></trk>')
+    gpx.append('</gpx>')
+    return "\n".join(gpx)
+
+def calculate_map_center_and_zoom(route_coords):
+    """Calculates the geometric centroid and optimal zoom level for framing the route."""
+    lats = [c[1] for c in route_coords]
+    lons = [c[0] for c in route_coords]
+    
+    min_lat, max_lat = min(lats), max(lats)
+    min_lon, max_lon = min(lons), max(lons)
+    
+    center_lat = (min_lat + max_lat) / 2.0
+    center_lon = (min_lon + max_lon) / 2.0
+    
+    lat_span = max_lat - min_lat
+    lon_span = max_lon - min_lon
+    max_span = max(lat_span, lon_span)
+    
+    if max_span > 15: zoom = 3
+    elif max_span > 8: zoom = 4
+    elif max_span > 4: zoom = 5
+    elif max_span > 2: zoom = 6
+    elif max_span > 1: zoom = 7
+    elif max_span > 0.5: zoom = 8
+    elif max_span > 0.2: zoom = 9
+    elif max_span > 0.08: zoom = 10
+    else: zoom = 11
+    
+    return center_lat, center_lon, zoom
 
 # --- TOPOGRAPHIC NUMERICAL INTEGRATION ENGINE ---
 def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wind_spd, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles):
@@ -360,7 +416,7 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         for p in places:
             c = get_coordinates(p)
             if c is None:
-                st.error(f"⚠️ Geocoding failed for city: '{p}'. OpenStreetMap might be overwhelmed or the city is misspelled.")
+                st.error(f"⚠️ Geocoding failed for city: '{p}'. Verify spelling or location name.")
                 st.stop()
             coords_list.append(c)
             
@@ -409,20 +465,54 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         else:
             st.success(f"✅ **HIGH CONFIDENCE:** 99th percentile worst-case arrival SOC is {mc_results['p99_worst']}%. Zero stranding risk detected.")
 
+        google_maps_url = build_google_maps_url(coords_list[0], coords_list[-1], verified_charge_stops)
+        gpx_data = build_gpx_file(full_route_coords, verified_charge_stops)
+        
+        exp_col1, exp_col2 = st.columns(2)
+        with exp_col1:
+            st.link_button("🗺️ Open Full Route in Google Maps", google_maps_url, type="primary", use_container_width=True)
+        with exp_col2:
+            st.download_button("📥 Export GPX File (For GPS Units / Apple / Waze)", gpx_data, "ev_trip_route.gpx", "application/gpx+xml", use_container_width=True)
+
         st.write("") 
         tab_map, tab_mc, tab_opt, tab_finance, tab_data = st.tabs([
             "🗺️ Route Map", "🎲 Monte Carlo Confidence", "📈 Speed Optimizer", "💵 Financials & Cell Aging", "📥 Flight Recorder Data"
         ])
         
         with tab_map:
+            # Dynamic calculation of map center and zoom level to frame the route
+            center_lat, center_lon, dynamic_zoom = calculate_map_center_and_zoom(full_route_coords)
+            
             layers = [pdk.Layer("PathLayer", data=[{"path": full_route_coords}], get_path="path", get_color=[0, 180, 255], width_min_pixels=4)]
+            
             for idx, stop in enumerate(verified_charge_stops):
                 layers.extend([
-                    pdk.Layer("ScatterplotLayer", data=[{"position": stop["coords"]}], get_position="position", get_color=[0, 255, 128, 60], get_radius=3000, radius_min_pixels=30),
-                    pdk.Layer("ScatterplotLayer", data=[{"position": stop["coords"]}], get_position="position", get_color=[0, 255, 128, 255], get_radius=500, radius_min_pixels=10),
-                    pdk.Layer("TextLayer", data=[{"position": stop["coords"], "text": f"⚡ STOP {idx+1}: {stop['name'][:18]}..."}], get_position="position", get_text="text", get_color=[255, 255, 255, 255], get_size=15, get_pixel_offset=[0, -25])
+                    pdk.Layer("ScatterplotLayer", data=[{"position": stop["coords"]}], get_position="position", get_color=[0, 255, 128, 80], radius_min_pixels=14, radius_max_pixels=22),
+                    pdk.Layer("ScatterplotLayer", data=[{"position": stop["coords"]}], get_position="position", get_color=[0, 255, 128, 255], radius_min_pixels=5, radius_max_pixels=8),
+                    pdk.Layer("TextLayer", data=[{"position": stop["coords"], "text": f"⚡ STOP {idx+1}: {stop['name'][:22]}..."}], get_position="position", get_text="text", get_color=[255, 255, 255, 255], get_size=14, get_pixel_offset=[0, -20])
                 ])
-            st.pydeck_chart(pdk.Deck(map_provider="carto", map_style="dark", layers=layers, initial_view_state=pdk.ViewState(latitude=coords_list[0][0], longitude=coords_list[0][1], zoom=6, pitch=35)), use_container_width=True)
+                
+            if death_coords:
+                layers.extend([
+                    pdk.Layer("ScatterplotLayer", data=[{"position": death_coords}], get_position="position", get_color=[255, 0, 60, 100], radius_min_pixels=18, radius_max_pixels=28),
+                    pdk.Layer("ScatterplotLayer", data=[{"position": death_coords}], get_position="position", get_color=[255, 0, 60, 255], radius_min_pixels=7, radius_max_pixels=10),
+                    pdk.Layer("TextLayer", data=[{"position": death_coords, "text": "❌ CRITICAL: BATTERY DEPLETED HERE"}], get_position="position", get_text="text", get_color=[255, 60, 60, 255], get_size=15, get_pixel_offset=[0, -25])
+                ])
+
+            st.pydeck_chart(
+                pdk.Deck(
+                    map_provider="carto", 
+                    map_style="dark", 
+                    layers=layers, 
+                    initial_view_state=pdk.ViewState(
+                        latitude=center_lat, 
+                        longitude=center_lon, 
+                        zoom=dynamic_zoom, 
+                        pitch=35
+                    )
+                ), 
+                use_container_width=True
+            )
 
         with tab_mc:
             st.markdown("### 🎲 Monte Carlo Uncertainty Quantification (100 Passes)")
