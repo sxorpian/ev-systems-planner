@@ -10,7 +10,12 @@ from geopy.geocoders import Nominatim
 import urllib.parse
 
 # --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="EV Spatial Simulator & Trip Planner", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(
+    page_title="EV Systems & Spatial Planner",
+    page_icon="⚡",
+    layout="wide",
+    initial_sidebar_state="expanded"  # Forces sidebar to start visible on all devices
+)
 
 # --- PWA & MOBILE VIEWPORT STYLING (SAFE ROLLBACK) ---
 st.markdown("""
