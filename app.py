@@ -12,6 +12,18 @@ import urllib.parse
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="EV Spatial Simulator & Trip Planner", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
+# --- PWA & MOBILE VIEWPORT STYLING ---
+st.markdown("""
+    <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        .block-container {padding-top: 1.5rem; padding-bottom: 0rem;}
+    </style>
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+""", unsafe_allow_html=True)
+
 # --- VEHICLE & ACCESSORY DATABASES ---
 EV_DATABASE = {
     "Tesla Model 3 Long Range": {"kwh": 75.0, "mass_kg": 1830, "cd": 0.219, "area_m2": 2.22, "hvac": "Heat Pump"},

@@ -4,18 +4,23 @@
 [![Streamlit](https://img.shields.io/badge/Streamlit-1.32.0-red.svg)](https://streamlit.io/)
 [![Deployment](https://img.shields.io/badge/Live_App-Click_Here-success.svg)](https://ev-systems-planner.streamlit.app) 
 
+[![Deployment](https://img.shields.io/badge/Live_App-Click_Here-success.svg)](https://ev-systems-planner.streamlit.app)
+
+![EV Systems Planner Dashboard](dashboard.png)
+
 A production-grade Python application utilizing topographical numerical integration, stochastic Monte Carlo simulations, and real-time APIs to model Electric Vehicle (EV) kinetic resistance, thermodynamics, and battery degradation over spatial routes. 
 
-Designed as a superior alternative to static route planners, this tool transforms theoretical physics into actionable, probabilistic trip data for everyday EV drivers and fleet operators.
+Designed as a superior alternative to static route planners, this tool transforms theoretical physics into actionable, probabilistic trip data with multi-platform GPS exporting.
 
 ---
 
 ## 🏗️ System Architecture & API Integrations
 
-The application operates on a state-space integration loop, calculating energy draw across discrete spatial segments (~100 nodes per route). It integrates three live external APIs:
+The application operates on a state-space integration loop, calculating energy draw across discrete spatial segments (~100 nodes per route). It integrates four live external APIs:
 1. **OSRM (Open Source Routing Machine):** Generates the multi-waypoint geographic polyline (GPS coordinates and distances).
 2. **Open-Meteo API:** Injects real-time local weather data (temperature, wind vectors) and spatial topography maps for elevation changes.
 3. **NREL (National Renewable Energy Lab) API:** Pings the U.S. Department of Energy database to proactively route the vehicle to the nearest verified DC Fast Charger when the battery drops below 15%.
+4. **Dual-Engine Geocoding:** Utilizes a resilient Photon/OpenStreetMap primary engine with Nominatim fallback and automatic state abbreviation expansion to process fuzzy geographic inputs without failing.
 
 ---
 
@@ -42,7 +47,10 @@ When descending a mountain, kinetic energy is recaptured. The engine applies an 
 
 ## 🧬 Advanced Engineering Modules
 
-### 🎲 Monte Carlo Confidence Engine (Uncertainty Quantification)
+### 🗺️ Dynamic Mapping & Navigation Export
+Replaces static map views with sub-meter GPS pinpoints. The engine calculates the geometric centroid of the polyline to dynamically frame and zoom the viewport. Planners can export the final calculated route via **GPX XML files** for dedicated GPS hardware or click directly into **Google Maps deep links** for live mobile navigation.
+
+### 🎲 Monte Carlo Confidence Engine
 Static route planners fail when wind gusts or temperature drops occur. This application runs **100 parallel stochastic passes** using Gaussian distributions for driver speed variance, temperature fluctuations, and wind gusts. It outputs a 95% Confidence Interval for arrival battery and calculates a strict stranding probability.
 
 ### 📈 Cruising Speed Optimizer
