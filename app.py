@@ -50,7 +50,7 @@ STATE_ABBRS = {
 
 # --- GEOGRAPHIC & NAVIGATION UTILITIES ---
 def clean_address_query(address):
-    """Normalizes raw input strings and expands state abbreviations for fuzzy geocoding."""
+    """Normalizes raw input strings and explicitly locks the search to the US."""
     tokens = address.replace(',', ' ').split()
     cleaned = []
     for token in tokens:
@@ -59,16 +59,45 @@ def clean_address_query(address):
             cleaned.append(STATE_ABBRS[up])
         else:
             cleaned.append(token)
-    return " ".join(cleaned)
+            
+    query = " ".join(cleaned)
+    # Lock coordinates to North America to prevent impossible ocean routes
+    if "USA" not in query.upper() and "UNITED STATES" not in query.upper():
+        query += " USA"
+    return query
 
 @st.cache_data(show_spinner=False)
 def get_coordinates(address):
-    """3-tiered resilient fuzzy geocoder with fallback handling for spelling errors."""
+    """Dual-engine resilient geocoder. Removes the faulty Open-Meteo island bug."""
     if not address or not address.strip():
         return None
         
     query = clean_address_query(address)
     headers = {"User-Agent": PROJECT_USER_AGENT}
+    
+    # Tier 1: Photon Geocoding API (Fast, Typo-Tolerant)
+    try:
+        encoded_query = urllib.parse.quote(query)
+        photon_url = f"https://photon.komoot.io/api/?q={encoded_query}&limit=1"
+        resp = requests.get(photon_url, headers=headers, timeout=5)
+        if resp.status_code == 200:
+            features = resp.json().get("features", [])
+            if features:
+                coords = features[0]["geometry"]["coordinates"]
+                return (coords[1], coords[0])
+    except Exception:
+        pass
+
+    # Tier 2: Nominatim (Rigorous Fallback)
+    try:
+        geolocator = Nominatim(user_agent=PROJECT_USER_AGENT, timeout=10)
+        loc = geolocator.geocode(query)
+        if loc:
+            return (loc.latitude, loc.longitude)
+    except Exception:
+        pass
+
+    return None
     
     # Tier 1: Photon Geocoding API (Fast, OpenStreetMap-backed, Fuzzy & Typo-Tolerant)
     try:
