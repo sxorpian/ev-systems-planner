@@ -12,25 +12,19 @@ import urllib.parse
 # --- PAGE CONFIGURATION ---
 st.set_page_config(page_title="EV Spatial Simulator & Trip Planner", page_icon="⚡", layout="wide", initial_sidebar_state="expanded")
 
-# --- PWA & MOBILE VIEWPORT STYLING (FIXED SIDEBAR TOGGLE) ---
+# --- PWA & MOBILE VIEWPORT STYLING (FINAL SIDEBAR FIX) ---
 st.markdown("""
     <style>
+        /* Hide Streamlit branding and top-right menu */
         #MainMenu {visibility: hidden;}
+        [data-testid="stToolbar"] {visibility: hidden;}
         footer {visibility: hidden;}
-        /* Keep only the main header bar hidden, but force the mobile sidebar toggle button to display */
-        header > div {visibility: hidden;}
-        [data-testid="collapsedControl"] {
-            visibility: visible !important;
-            display: block !important;
-            position: fixed;
-            top: 10px;
-            left: 10px;
-            z-index: 999999;
-            background-color: rgba(255, 255, 255, 0.85);
-            border-radius: 50%;
-            padding: 4px;
-        }
-        .block-container {padding-top: 3.5rem; padding-bottom: 0rem;}
+        
+        /* Make the header transparent so the native sidebar toggle works normally */
+        header {background: transparent !important;}
+        
+        /* Adjust top padding so content doesn't hide under the transparent header */
+        .block-container {padding-top: 3rem !important; padding-bottom: 0rem !important;}
     </style>
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
