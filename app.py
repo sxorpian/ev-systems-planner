@@ -40,6 +40,7 @@ def haversine(lon1, lat1, lon2, lat2):
     dphi = math.radians(lat2 - lat1)
     dlam = math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
+    a = min(1.0, max(0.0, a))  # Floating-point domain error safeguard
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
 def get_bearing(lat1, lon1, lat2, lon2):
@@ -57,29 +58,38 @@ def get_live_weather(lat, lon):
         if resp.status_code == 200:
             c = resp.json().get("current", {})
             return c.get("temperature_2m", 70.0), c.get("wind_speed_10m", 0.0), c.get("wind_direction_10m", 0.0)
-    except: pass
+    except Exception:
+        pass
     return 70.0, 0.0, 0.0
 
 @st.cache_data(show_spinner=False)
 def get_coordinates(address):
     try:
-        geolocator = Nominatim(user_agent="grcc_ev_mapper_project")
-        loc = geolocator.geocode(address, timeout=10)
+        geolocator = Nominatim(user_agent="ev_spatial_sim_app_v2", timeout=10)
+        loc = geolocator.geocode(address)
         return (loc.latitude, loc.longitude) if loc else None
-    except: return None
+    except Exception:
+        return None
 
 @st.cache_data(show_spinner=False)
 def get_route_data_multi(coords_list):
     lon_lats = ";".join([f"{c[1]},{c[0]}" for c in coords_list])
-    url = f"http://router.project-osrm.org/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
-    try:
-        resp = requests.get(url, timeout=30)
-        if resp.status_code == 200:
-            route = resp.json()["routes"][0]
-            dist = route["distance"] * 0.000621371
-            dur = route["duration"] / 60.0
-            return dist, dur, route["geometry"]["coordinates"]
-    except: pass
+    
+    # Primary HTTPS Endpoint
+    url_primary = f"https://router.project-osrm.org/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
+    # Secondary Fallback Endpoint
+    url_fallback = f"https://routing.openstreetmap.de/routed-car/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
+    
+    for url in [url_primary, url_fallback]:
+        try:
+            resp = requests.get(url, timeout=15)
+            if resp.status_code == 200:
+                route = resp.json()["routes"][0]
+                dist = route["distance"] * 0.000621371
+                dur = route["duration"] / 60.0
+                return dist, dur, route["geometry"]["coordinates"]
+        except Exception:
+            continue
     return None, None, None
 
 @st.cache_data(show_spinner=False)
@@ -89,19 +99,19 @@ def get_elevation_chunk(lats_str, lons_str):
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             return resp.json().get("elevation")
-    except: pass
+    except Exception:
+        pass
     return None
 
 def process_elevation(coords):
-    # Dynamic sampling scaled to route length (~120 points)
-    max_pts = 120
+    max_pts = 100
     step = max(1, len(coords) // max_pts)
     sampled = coords[::step][:max_pts]
-    if sampled[-1] != coords[-1]: sampled.append(coords[-1])
+    if sampled[-1] != coords[-1]:
+        sampled.append(coords[-1])
     
-    # Chunk requests to prevent Open-Meteo URL length overflow
     elevations = []
-    chunk_size = 80
+    chunk_size = 40
     for i in range(0, len(sampled), chunk_size):
         chunk = sampled[i:i+chunk_size]
         lats = ",".join([str(round(c[1], 4)) for c in chunk])
@@ -117,17 +127,18 @@ def process_elevation(coords):
 def get_nearest_charger(lat, lon):
     url = f"https://developer.nrel.gov/api/alt-fuel-stations/v1/nearest.json?api_key=DEMO_KEY&latitude={lat}&longitude={lon}&fuel_type=ELEC&access=public&status=E&limit=1"
     try:
-        resp = requests.get(url, timeout=10)
+        resp = requests.get(url, timeout=5)
         if resp.status_code == 200:
             stations = resp.json().get("alt_fuel_stations", [])
             if stations:
                 s = stations[0]
                 return s["station_name"], [s["longitude"], s["latitude"]], s["distance"]
-    except: pass
+    except Exception:
+        pass
     return None, None, None
 
 # --- TOPOGRAPHIC NUMERICAL INTEGRATION ENGINE ---
-def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wind_spd, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning):
+def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wind_spd, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles=None):
     rho = 353.05 / ((temp_f - 32) * (5 / 9) + 273.15)
     g, crr, eta_drive, base_regen_eta, p_aux_kw = 9.81, 0.015, 0.90, 0.70, 0.5
     v_ground_mps = speed_mph * 0.44704 
@@ -155,6 +166,10 @@ def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wi
     death_coords = None
     cum_dist = 0.0
 
+    # Calculate exact distance scaling factor to eliminate sampling curvature loss
+    chord_miles = sum(haversine(coords[j][0], coords[j][1], coords[j+1][0], coords[j+1][1]) for j in range(len(coords)-1))
+    scale_factor = (total_route_miles / chord_miles) if (total_route_miles and chord_miles > 0) else 1.0
+
     telemetry_log = [{
         "Node ID": 0, "Latitude": round(coords[0][1], 6), "Longitude": round(coords[0][0], 6),
         "Cumulative Distance (mi)": 0.0, "Elevation (ft)": round(elevations[0] * 3.28084, 1),
@@ -165,12 +180,14 @@ def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wi
         p1, p2 = coords[i], coords[i+1]
         e1, e2 = elevations[i], elevations[i+1]
         
-        dist_m = haversine(p1[0], p1[1], p2[0], p2[1]) * 1609.34
+        raw_miles = haversine(p1[0], p1[1], p2[0], p2[1])
+        segment_miles = raw_miles * scale_factor
+        dist_m = segment_miles * 1609.34
         if dist_m <= 0: continue
         
         theta = math.atan2((e2 - e1), dist_m)
         t_hours = (dist_m / v_ground_mps) / 3600.0
-        cum_dist += (dist_m * 0.000621371)
+        cum_dist += segment_miles
         
         bearing = get_bearing(p1[1], p1[0], p2[1], p2[0])
         headwind_mph = wind_spd * math.cos(math.radians(wind_dir - bearing))
@@ -228,7 +245,7 @@ def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wi
     return kwh_gross, kwh_regen, current_batt, usable_kwh, charge_events, death_coords, telemetry, pd.DataFrame(telemetry_log)
 
 # --- MONTE CARLO CONFIDENCE ENGINE ---
-def run_monte_carlo_simulation(ev, coords, elevations, target_speed, base_temp, base_wind_spd, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, runs=50):
+def run_monte_carlo_simulation(ev, coords, elevations, target_speed, base_temp, base_wind_spd, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles, runs=50):
     np.random.seed(42)
     speed_variations = np.random.normal(target_speed, 3.0, runs)
     temp_variations = np.random.normal(base_temp, 4.0, runs)
@@ -242,7 +259,7 @@ def run_monte_carlo_simulation(ev, coords, elevations, target_speed, base_temp, 
         sim_wind = float(np.clip(wind_spd_variations[i], 0, 50))
         
         _, _, final_batt, usable_kwh, _, _, _, _ = run_spatial_physics_simulation(
-            ev, coords, elevations, sim_speed, sim_temp, sim_wind, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning
+            ev, coords, elevations, sim_speed, sim_temp, sim_wind, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles
         )
         final_soc_results.append(max(0.0, (final_batt / usable_kwh) * 100.0))
         
@@ -257,15 +274,15 @@ def run_monte_carlo_simulation(ev, coords, elevations, target_speed, base_temp, 
     }
 
 # --- SPEED OPTIMIZATION ENGINE ---
-def find_optimal_cruising_speed(ev, coords, elevations, base_temp, base_wind_spd, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning):
+def find_optimal_cruising_speed(ev, coords, elevations, base_temp, base_wind_spd, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles):
     speed_sweep = list(range(55, 86, 5))
     sweep_data = []
 
     for test_speed in speed_sweep:
         kwh_gross, kwh_regen, final_batt, usable_kwh, charge_events, death_coords, telemetry, df_log = run_spatial_physics_simulation(
-            ev, coords, elevations, test_speed, base_temp, base_wind_spd, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning
+            ev, coords, elevations, test_speed, base_temp, base_wind_spd, base_wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles
         )
-        dist_miles = df_log["Cumulative Distance (mi)"].iloc[-1]
+        dist_miles = total_route_miles if total_route_miles else df_log["Cumulative Distance (mi)"].iloc[-1]
         drive_hrs = dist_miles / test_speed
         
         # 150 kW DC Fast Charge speed assumption (Charging 15% -> 80% = 65% pack)
@@ -333,7 +350,7 @@ st.markdown("A predictive systems engineering route planner executing Monte Carl
 route_text = st.text_area(
     "📍 Multi-Stop Itinerary (One city/address per line)", 
     value="", 
-    placeholder="e.g., Detroit, MI\ne.g., Chicago, IL\ne.g., Nashville, TN", 
+    placeholder="e.g., Grand Rapids, MI\ne.g., Chicago, IL\ne.g., Nashville, TN", 
     height=90
 )
 
@@ -351,7 +368,7 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
             
         dist_miles, duration_mins, full_route_coords = get_route_data_multi(coords_list)
         if not full_route_coords:
-            st.error("Routing failed between these endpoints.")
+            st.error("Routing failed between these endpoints. OSRM API servers might be busy.")
             st.stop()
 
         if use_live_weather:
@@ -360,15 +377,15 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         sampled_coords, elevations = process_elevation(full_route_coords)
         
         kwh_gross, kwh_regen, final_batt, usable_kwh, charge_events, death_coords, telemetry, df_log = run_spatial_physics_simulation(
-            ev_specs, sampled_coords, elevations, speed, temp, wind_speed, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning
+            ev_specs, sampled_coords, elevations, speed, temp, wind_speed, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, dist_miles
         )
         
         mc_results = run_monte_carlo_simulation(
-            ev_specs, sampled_coords, elevations, speed, temp, wind_speed, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning
+            ev_specs, sampled_coords, elevations, speed, temp, wind_speed, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, dist_miles
         )
         
         df_speed_opt, opt_speed, min_duration = find_optimal_cruising_speed(
-            ev_specs, sampled_coords, elevations, temp, wind_speed, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning
+            ev_specs, sampled_coords, elevations, temp, wind_speed, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, dist_miles
         )
         
         verified_charge_stops = []
