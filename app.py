@@ -80,9 +80,12 @@ def get_route_data_multi(coords_list):
     # Secondary Fallback Endpoint
     url_fallback = f"https://routing.openstreetmap.de/routed-car/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
     
+    # Custom User-Agent to bypass OSRM bot-blocking filters
+    headers = {"User-Agent": "EVSpatialSimulator/2.0 (Portfolio Project)"}
+    
     for url in [url_primary, url_fallback]:
         try:
-            resp = requests.get(url, timeout=15)
+            resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 route = resp.json()["routes"][0]
                 dist = route["distance"] * 0.000621371
