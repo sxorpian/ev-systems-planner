@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pydeck as pdk
 from geopy.geocoders import Nominatim
 
@@ -33,6 +32,9 @@ AERO_ACCESSORIES = {
     "Enclosed Heavy Box Trailer": {"delta_cd": 0.28, "delta_area": 1.50, "extra_weight_lbs": 3500}
 }
 
+# Unique identifier to bypass OpenStreetMap bot-blockers
+PROJECT_USER_AGENT = "grcc_ev_portfolio_project_cj/2.0"
+
 # --- GEOGRAPHIC & INFRASTRUCTURE UTILITIES ---
 def haversine(lon1, lat1, lon2, lat2):
     R = 3958.8 
@@ -40,7 +42,7 @@ def haversine(lon1, lat1, lon2, lat2):
     dphi = math.radians(lat2 - lat1)
     dlam = math.radians(lon2 - lon1)
     a = math.sin(dphi/2)**2 + math.cos(phi1)*math.cos(phi2)*math.sin(dlam/2)**2
-    a = min(1.0, max(0.0, a))  # Floating-point domain error safeguard
+    a = min(1.0, max(0.0, a))
     return R * (2 * math.atan2(math.sqrt(a), math.sqrt(1-a)))
 
 def get_bearing(lat1, lon1, lat2, lon2):
@@ -58,14 +60,13 @@ def get_live_weather(lat, lon):
         if resp.status_code == 200:
             c = resp.json().get("current", {})
             return c.get("temperature_2m", 70.0), c.get("wind_speed_10m", 0.0), c.get("wind_direction_10m", 0.0)
-    except Exception:
-        pass
+    except Exception: pass
     return 70.0, 0.0, 0.0
 
 @st.cache_data(show_spinner=False)
 def get_coordinates(address):
     try:
-        geolocator = Nominatim(user_agent="ev_spatial_sim_app_v2", timeout=10)
+        geolocator = Nominatim(user_agent=PROJECT_USER_AGENT, timeout=15)
         loc = geolocator.geocode(address)
         return (loc.latitude, loc.longitude) if loc else None
     except Exception:
@@ -74,26 +75,27 @@ def get_coordinates(address):
 @st.cache_data(show_spinner=False)
 def get_route_data_multi(coords_list):
     lon_lats = ";".join([f"{c[1]},{c[0]}" for c in coords_list])
+    urls = [
+        f"https://router.project-osrm.org/route/v1/driving/{lon_lats}?overview=full&geometries=geojson",
+        f"https://routing.openstreetmap.de/routed-car/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
+    ]
+    headers = {"User-Agent": PROJECT_USER_AGENT}
+    error_msg = "Unknown Error"
     
-    # Primary HTTPS Endpoint
-    url_primary = f"https://router.project-osrm.org/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
-    # Secondary Fallback Endpoint
-    url_fallback = f"https://routing.openstreetmap.de/routed-car/route/v1/driving/{lon_lats}?overview=full&geometries=geojson"
-    
-    # Custom User-Agent to bypass OSRM bot-blocking filters
-    headers = {"User-Agent": "EVSpatialSimulator/2.0 (Portfolio Project)"}
-    
-    for url in [url_primary, url_fallback]:
+    for url in urls:
         try:
             resp = requests.get(url, headers=headers, timeout=15)
             if resp.status_code == 200:
                 route = resp.json()["routes"][0]
                 dist = route["distance"] * 0.000621371
                 dur = route["duration"] / 60.0
-                return dist, dur, route["geometry"]["coordinates"]
-        except Exception:
+                return dist, dur, route["geometry"]["coordinates"], None
+            else:
+                error_msg = f"HTTP {resp.status_code} - {resp.text[:50]}"
+        except Exception as e:
+            error_msg = str(e)
             continue
-    return None, None, None
+    return None, None, None, error_msg
 
 @st.cache_data(show_spinner=False)
 def get_elevation_chunk(lats_str, lons_str):
@@ -102,16 +104,14 @@ def get_elevation_chunk(lats_str, lons_str):
         resp = requests.get(url, timeout=10)
         if resp.status_code == 200:
             return resp.json().get("elevation")
-    except Exception:
-        pass
+    except Exception: pass
     return None
 
 def process_elevation(coords):
     max_pts = 100
     step = max(1, len(coords) // max_pts)
     sampled = coords[::step][:max_pts]
-    if sampled[-1] != coords[-1]:
-        sampled.append(coords[-1])
+    if sampled[-1] != coords[-1]: sampled.append(coords[-1])
     
     elevations = []
     chunk_size = 40
@@ -136,12 +136,11 @@ def get_nearest_charger(lat, lon):
             if stations:
                 s = stations[0]
                 return s["station_name"], [s["longitude"], s["latitude"]], s["distance"]
-    except Exception:
-        pass
+    except Exception: pass
     return None, None, None
 
 # --- TOPOGRAPHIC NUMERICAL INTEGRATION ENGINE ---
-def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wind_spd, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles=None):
+def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wind_spd, wind_dir, soh_pct, payload_lbs, aero_preset, preconditioning, total_route_miles):
     rho = 353.05 / ((temp_f - 32) * (5 / 9) + 273.15)
     g, crr, eta_drive, base_regen_eta, p_aux_kw = 9.81, 0.015, 0.90, 0.70, 0.5
     v_ground_mps = speed_mph * 0.44704 
@@ -169,7 +168,6 @@ def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wi
     death_coords = None
     cum_dist = 0.0
 
-    # Calculate exact distance scaling factor to eliminate sampling curvature loss
     chord_miles = sum(haversine(coords[j][0], coords[j][1], coords[j+1][0], coords[j+1][1]) for j in range(len(coords)-1))
     scale_factor = (total_route_miles / chord_miles) if (total_route_miles and chord_miles > 0) else 1.0
 
@@ -221,13 +219,9 @@ def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wi
         
         net_drain = gross_kwh + base_kwh - regen_kwh
         
-        # PROACTIVE CHARGING CHECK: Triggers charging BEFORE pack drops below 15% SOC threshold
         if (current_batt - net_drain) < (usable_kwh * 0.15):
-            charge_events.append({
-                "coords": [p1[0], p1[1]], 
-                "soc_arrival": max(0.0, round((current_batt / usable_kwh) * 100.0, 1))
-            })
-            current_batt = usable_kwh * 0.80  # Fast Charge to 80% SOC
+            charge_events.append({"coords": [p1[0], p1[1]], "soc_arrival": max(0.0, round((current_batt / usable_kwh) * 100.0, 1))})
+            current_batt = usable_kwh * 0.80 
             
         current_batt -= net_drain
         if current_batt > usable_kwh: current_batt = usable_kwh
@@ -287,8 +281,6 @@ def find_optimal_cruising_speed(ev, coords, elevations, base_temp, base_wind_spd
         )
         dist_miles = total_route_miles if total_route_miles else df_log["Cumulative Distance (mi)"].iloc[-1]
         drive_hrs = dist_miles / test_speed
-        
-        # 150 kW DC Fast Charge speed assumption (Charging 15% -> 80% = 65% pack)
         charge_hrs = len(charge_events) * ((usable_kwh * 0.65) / 150.0)
         total_hrs = drive_hrs + charge_hrs
         
@@ -364,14 +356,17 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         st.stop()
         
     with st.spinner("Executing spatial integration, weather calls, and Monte Carlo stochastic passes..."):
-        coords_list = [get_coordinates(p) for p in places]
-        if None in coords_list:
-            st.error("Invalid locations provided. Please verify city names and spelling.")
-            st.stop()
+        coords_list = []
+        for p in places:
+            c = get_coordinates(p)
+            if c is None:
+                st.error(f"⚠️ Geocoding failed for city: '{p}'. OpenStreetMap might be overwhelmed or the city is misspelled.")
+                st.stop()
+            coords_list.append(c)
             
-        dist_miles, duration_mins, full_route_coords = get_route_data_multi(coords_list)
+        dist_miles, duration_mins, full_route_coords, routing_error = get_route_data_multi(coords_list)
         if not full_route_coords:
-            st.error("Routing failed between these endpoints. OSRM API servers might be busy.")
+            st.error(f"⚠️ Routing API blocked the request or failed. Reason: {routing_error}")
             st.stop()
 
         if use_live_weather:
@@ -466,7 +461,6 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
             st.markdown("### 💵 Total Cost of Ownership Comparison")
             ev_elec_cost = net_kwh_used * elec_rate
             
-            # Electrochemical cell aging cost model ($0.035 per kWh throughput equivalent)
             cell_wear_cost = (net_kwh_used + (len(verified_charge_stops) * usable_kwh * 0.65)) * 0.035
             total_ev_cost = ev_elec_cost + cell_wear_cost
             ice_cost = (dist_miles / ice_mpg) * gas_price
