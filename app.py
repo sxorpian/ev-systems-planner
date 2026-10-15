@@ -33,7 +33,7 @@ AERO_ACCESSORIES = {
     "Enclosed Heavy Box Trailer": {"delta_cd": 0.28, "delta_area": 1.50, "extra_weight_lbs": 3500}
 }
 
-# --- GEOGRAPHIC & INFRASTRUCTURE UTILITIES (CACHED) ---
+# --- GEOGRAPHIC & INFRASTRUCTURE UTILITIES ---
 def haversine(lon1, lat1, lon2, lat2):
     R = 3958.8 
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -83,7 +83,7 @@ def get_route_data_multi(coords_list):
     return None, None, None
 
 @st.cache_data(show_spinner=False)
-def get_elevation_profile(lats_str, lons_str):
+def get_elevation_chunk(lats_str, lons_str):
     url = f"https://api.open-meteo.com/v1/elevation?latitude={lats_str}&longitude={lons_str}"
     try:
         resp = requests.get(url, timeout=10)
@@ -93,15 +93,25 @@ def get_elevation_profile(lats_str, lons_str):
     return None
 
 def process_elevation(coords):
-    step = max(1, len(coords) // 99)
-    sampled = coords[::step][:99]
+    # Dynamic sampling scaled to route length (~120 points)
+    max_pts = 120
+    step = max(1, len(coords) // max_pts)
+    sampled = coords[::step][:max_pts]
     if sampled[-1] != coords[-1]: sampled.append(coords[-1])
-    lats = ",".join([str(round(c[1], 4)) for c in sampled])
-    lons = ",".join([str(round(c[0], 4)) for c in sampled])
-    elev_data = get_elevation_profile(lats, lons)
-    if elev_data and len(elev_data) == len(sampled):
-        return sampled, elev_data
-    return sampled, [0]*len(sampled)
+    
+    # Chunk requests to prevent Open-Meteo URL length overflow
+    elevations = []
+    chunk_size = 80
+    for i in range(0, len(sampled), chunk_size):
+        chunk = sampled[i:i+chunk_size]
+        lats = ",".join([str(round(c[1], 4)) for c in chunk])
+        lons = ",".join([str(round(c[0], 4)) for c in chunk])
+        elev_data = get_elevation_chunk(lats, lons)
+        if elev_data and len(elev_data) == len(chunk):
+            elevations.extend(elev_data)
+        else:
+            elevations.extend([0] * len(chunk))
+    return sampled, elevations
 
 @st.cache_data(show_spinner=False)
 def get_nearest_charger(lat, lon):
@@ -190,17 +200,22 @@ def run_spatial_physics_simulation(ev, coords, elevations, speed_mph, temp_f, wi
         telemetry["Thermal Preconditioning"] += p_precondition_kw * t_hours
         
         net_drain = gross_kwh + base_kwh - regen_kwh
+        
+        # PROACTIVE CHARGING CHECK: Triggers charging BEFORE pack drops below 15% SOC threshold
+        if (current_batt - net_drain) < (usable_kwh * 0.15):
+            charge_events.append({
+                "coords": [p1[0], p1[1]], 
+                "soc_arrival": max(0.0, round((current_batt / usable_kwh) * 100.0, 1))
+            })
+            current_batt = usable_kwh * 0.80  # Fast Charge to 80% SOC
+            
         current_batt -= net_drain
         if current_batt > usable_kwh: current_batt = usable_kwh
         
         kwh_gross += (gross_kwh + base_kwh)
         kwh_regen += regen_kwh
         
-        if current_batt < (usable_kwh * 0.12) and current_batt > 0:
-            charge_events.append({"coords": [p2[0], p2[1]], "soc_arrival": (current_batt / usable_kwh) * 100.0})
-            current_batt = usable_kwh * 0.80
-            
-        elif current_batt <= 0 and not death_coords:
+        if current_batt <= 0 and not death_coords:
             death_coords = [p2[0], p2[1]]
             break
 
@@ -252,18 +267,22 @@ def find_optimal_cruising_speed(ev, coords, elevations, base_temp, base_wind_spd
         )
         dist_miles = df_log["Cumulative Distance (mi)"].iloc[-1]
         drive_hrs = dist_miles / test_speed
-        charge_hrs = len(charge_events) * ((usable_kwh * 0.68) / 150.0)
+        
+        # 150 kW DC Fast Charge speed assumption (Charging 15% -> 80% = 65% pack)
+        charge_hrs = len(charge_events) * ((usable_kwh * 0.65) / 150.0)
         total_hrs = drive_hrs + charge_hrs
         
         sweep_data.append({
-            "Speed (mph)": test_speed, "Drive Time (hrs)": round(drive_hrs, 2),
-            "Charge Time (hrs)": round(charge_hrs, 2), "Total Duration (hrs)": round(total_hrs, 2),
-            "Stops": len(charge_events)
+            "Cruising Speed (mph)": test_speed, 
+            "Drive Time (hrs)": round(drive_hrs, 2),
+            "Charging Time (hrs)": round(charge_hrs, 2), 
+            "Total Trip Time (hrs)": round(total_hrs, 2),
+            "Charge Stops": len(charge_events)
         })
         
     df_sweep = pd.DataFrame(sweep_data)
-    opt_row = df_sweep.loc[df_sweep["Total Duration (hrs)"].idxmin()]
-    return df_sweep, int(opt_row["Speed (mph)"]), float(opt_row["Total Duration (hrs)"])
+    opt_row = df_sweep.loc[df_sweep["Total Trip Time (hrs)"].idxmin()]
+    return df_sweep, int(opt_row["Cruising Speed (mph)"]), float(opt_row["Total Trip Time (hrs)"])
 
 
 # ==========================================
@@ -303,19 +322,18 @@ with st.sidebar:
     preconditioning = st.toggle("🌡️ Thermal Battery Preconditioning", value=False)
         
     st.divider()
-    with st.expander("💵 Financial Benchmarking"):
+    with st.expander("💵 Economics Dashboard"):
         elec_rate = st.number_input("Electricity Rate ($/kWh)", value=0.19, step=0.01)
         gas_price = st.number_input("Gasoline Price ($/gal)", value=3.45, step=0.05)
-        ice_mpg = st.number_input("ICE Baseline (MPG)", value=17.0, step=1.0)
+        ice_mpg = st.number_input("ICE Baseline Efficiency (MPG)", value=22.0, step=1.0)
 
 st.title("⚡ EV Spatial Simulator & Trip Planner")
 st.markdown("A predictive systems engineering route planner executing Monte Carlo uncertainty quantification, trailer drag dynamics, and battery degradation models.")
 
-# Empty string value with clear multi-line "e.g." guidance placeholder
 route_text = st.text_area(
     "📍 Multi-Stop Itinerary (One city/address per line)", 
     value="", 
-    placeholder="e.g., Chicago, IL\ne.g., Indianapolis, IN\ne.g., Louisville, KY", 
+    placeholder="e.g., Detroit, MI\ne.g., Chicago, IL\ne.g., Nashville, TN", 
     height=90
 )
 
@@ -328,7 +346,7 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
     with st.spinner("Executing spatial integration, weather calls, and Monte Carlo stochastic passes..."):
         coords_list = [get_coordinates(p) for p in places]
         if None in coords_list:
-            st.error("Invalid locations provided. Please verify spelling.")
+            st.error("Invalid locations provided. Please verify city names and spelling.")
             st.stop()
             
         dist_miles, duration_mins, full_route_coords = get_route_data_multi(coords_list)
@@ -356,7 +374,10 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         verified_charge_stops = []
         for event in charge_events:
             c_name, c_coords, c_dist = get_nearest_charger(event["coords"][1], event["coords"][0])
-            if c_name: verified_charge_stops.append({"name": c_name, "coords": c_coords, "soc": event["soc_arrival"]})
+            if c_name: 
+                verified_charge_stops.append({"name": c_name, "coords": c_coords, "soc": event["soc_arrival"]})
+            else:
+                verified_charge_stops.append({"name": "En-route Fast Charger", "coords": event["coords"], "soc": event["soc_arrival"]})
                 
         batt_pct = (final_batt / usable_kwh) * 100.0
         net_kwh_used = max(0, (kwh_gross - kwh_regen))
@@ -380,38 +401,62 @@ if st.button("🚀 Execute Smart Route & Monte Carlo Simulation", type="primary"
         
         with tab_map:
             layers = [pdk.Layer("PathLayer", data=[{"path": full_route_coords}], get_path="path", get_color=[0, 180, 255], width_min_pixels=4)]
-            for stop in verified_charge_stops:
+            for idx, stop in enumerate(verified_charge_stops):
                 layers.extend([
                     pdk.Layer("ScatterplotLayer", data=[{"position": stop["coords"]}], get_position="position", get_color=[0, 255, 128, 60], get_radius=3000, radius_min_pixels=30),
                     pdk.Layer("ScatterplotLayer", data=[{"position": stop["coords"]}], get_position="position", get_color=[0, 255, 128, 255], get_radius=500, radius_min_pixels=10),
-                    pdk.Layer("TextLayer", data=[{"position": stop["coords"], "text": f"⚡ FAST CHARGE"}], get_position="position", get_text="text", get_color=[255, 255, 255, 255], get_size=16, get_pixel_offset=[0, -25])
+                    pdk.Layer("TextLayer", data=[{"position": stop["coords"], "text": f"⚡ STOP {idx+1}: {stop['name'][:18]}..."}], get_position="position", get_text="text", get_color=[255, 255, 255, 255], get_size=15, get_pixel_offset=[0, -25])
                 ])
             st.pydeck_chart(pdk.Deck(map_provider="carto", map_style="dark", layers=layers, initial_view_state=pdk.ViewState(latitude=coords_list[0][0], longitude=coords_list[0][1], zoom=6, pitch=35)), use_container_width=True)
 
         with tab_mc:
             st.markdown("### 🎲 Monte Carlo Uncertainty Quantification (100 Passes)")
+            st.write("Simulates 100 parallel driving scenarios with randomized weather shifts, speed variations, and temperature drops to generate a realistic battery distribution.")
             fig_hist = px.histogram(mc_results["soc_distribution"], nbins=20, labels={'value':'Arrival SOC (%)'}, title="Statistical Distribution of Arrival State of Charge", color_discrete_sequence=['#00CC96'])
             fig_hist.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)", showlegend=False)
             st.plotly_chart(fig_hist, use_container_width=True)
 
         with tab_opt:
-            st.markdown("### 📈 Speed-vs-Time Tradeoff Curve")
-            fig_opt = px.line(df_speed_opt, x="Speed (mph)", y="Total Duration (hrs)", markers=True, title="Cruising Speed vs. Total Trip Time (Drive + Charge Lag)")
-            fig_opt.update_layout(plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)")
+            st.markdown("### 📈 Cruising Speed vs. Total Trip Time")
+            
+            st.info(
+                f"💡 **Cruising Speed Sweet Spot: {opt_speed} mph**\n\n"
+                f"Driving faster increases aerodynamic drag exponentially ($v^3$). "
+                f"At speeds above **{opt_speed} mph**, the energy wasted forces longer charging stops that outweigh the time saved on the road."
+            )
+            
+            fig_opt = go.Figure()
+            fig_opt.add_trace(go.Bar(x=df_speed_opt["Cruising Speed (mph)"], y=df_speed_opt["Drive Time (hrs)"], name="Drive Time (hrs)", marker_color='#001f3f'))
+            fig_opt.add_trace(go.Bar(x=df_speed_opt["Cruising Speed (mph)"], y=df_speed_opt["Charging Time (hrs)"], name="Charging Time Lag (hrs)", marker_color='#00CC96'))
+            fig_opt.add_trace(go.Scatter(x=df_speed_opt["Cruising Speed (mph)"], y=df_speed_opt["Total Trip Time (hrs)"], name="Total Trip Duration (hrs)", line=dict(color='orange', width=3, dash='dash')))
+            
+            fig_opt.update_layout(
+                barmode='stack',
+                plot_bgcolor="rgba(0,0,0,0)", 
+                paper_bgcolor="rgba(0,0,0,0)",
+                title="Trip Time Breakdown Across Driving Speeds",
+                xaxis_title="Cruising Speed (mph)",
+                yaxis_title="Time (Hours)",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+            )
             st.plotly_chart(fig_opt, use_container_width=True)
+            st.dataframe(df_speed_opt, use_container_width=True)
 
         with tab_finance:
-            st.markdown("### 💵 Total Cost of Ownership (Electricity + Cell Degradation)")
+            st.markdown("### 💵 Total Cost of Ownership Comparison")
             ev_elec_cost = net_kwh_used * elec_rate
-            cell_wear_cost = (net_kwh_used + (len(verified_charge_stops) * usable_kwh * 0.68)) * 0.035
+            
+            # Electrochemical cell aging cost model ($0.035 per kWh throughput equivalent)
+            cell_wear_cost = (net_kwh_used + (len(verified_charge_stops) * usable_kwh * 0.65)) * 0.035
             total_ev_cost = ev_elec_cost + cell_wear_cost
             ice_cost = (dist_miles / ice_mpg) * gas_price
+            net_savings = ice_cost - total_ev_cost
             
             f1, f2, f3, f4 = st.columns(4)
-            f1.metric("Electricity Cost", f"${ev_elec_cost:.2f}")
-            f2.metric("Cell Wear Degradation Cost", f"${cell_wear_cost:.2f}")
+            f1.metric("EV Electricity Cost", f"${ev_elec_cost:.2f}")
+            f2.metric("Battery Cell Wear Cost", f"${cell_wear_cost:.2f}")
             f3.metric("Total Real EV Cost", f"${total_ev_cost:.2f}")
-            f4.metric("ICE Bronco Cost", f"${ice_cost:.2f}", delta_color="inverse")
+            f4.metric("ICE Baseline Cost", f"${ice_cost:.2f}", delta=f"EV Savings: ${net_savings:.2f}" if net_savings > 0 else f"ICE Cheaper by ${abs(net_savings):.2f}", delta_color="normal" if net_savings > 0 else "inverse")
 
         with tab_data:
             st.markdown("### 📥 Granular Telemetry Logs")
