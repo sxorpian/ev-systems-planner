@@ -15,7 +15,7 @@ Designed as a superior alternative to static route planners, this tool transform
 The application operates on a state-space integration loop, calculating energy draw across discrete spatial segments (~100 nodes per route). It integrates three live external APIs:
 1. **OSRM (Open Source Routing Machine):** Generates the multi-waypoint geographic polyline (GPS coordinates and distances).
 2. **Open-Meteo API:** Injects real-time local weather data (temperature, wind vectors) and spatial topography maps for elevation changes.
-3. **NREL (National Renewable Energy Lab) API:** Pings the U.S. Department of Energy database to proactively route the vehicle to the nearest verified DC Fast Charger when the battery drops below 12%.
+3. **NREL (National Renewable Energy Lab) API:** Pings the U.S. Department of Energy database to proactively route the vehicle to the nearest verified DC Fast Charger when the battery drops below 15%.
 
 ---
 
@@ -46,10 +46,10 @@ When descending a mountain, kinetic energy is recaptured. The engine applies an 
 Static route planners fail when wind gusts or temperature drops occur. This application runs **100 parallel stochastic passes** using Gaussian distributions for driver speed variance, temperature fluctuations, and wind gusts. It outputs a 95% Confidence Interval for arrival battery and calculates a strict stranding probability.
 
 ### 📈 Cruising Speed Optimizer
-Driving 80 mph instead of 68 mph exponentially increases energy draw due to aerodynamic drag, forcing extra charging stops. The software sweeps speeds from 55 to 85 mph, modeling both drive time and 150kW fast-charging lag, plotting the exact mathematical sweet spot for the shortest overall journey.
+Driving 80 mph instead of 68 mph exponentially increases energy draw due to aerodynamic drag, forcing extra charging stops. The software sweeps speeds from 55 to 85 mph, modeling both drive time and fast-charging lag, plotting the exact mathematical sweet spot for the shortest overall journey.
 
 ### 💵 Electrochemical Cell Aging & TCO Model
-Fast charging degrades lithium-ion cells. The app models the hidden Total Cost of Ownership (TCO) by calculating cell wear cost ($0.035 per kWh throughput equivalent) alongside regional electricity rates, benchmarking it against a 17 MPG ICE vehicle (e.g., Ford Bronco) for operational context.
+Fast charging degrades lithium-ion cells. The app models the hidden Total Cost of Ownership (TCO) by calculating cell wear cost ($0.035 per kWh throughput equivalent) alongside regional electricity rates, benchmarking it against a customizable ICE (Internal Combustion Engine) vehicle baseline for operational context.
 
 ---
 
